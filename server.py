@@ -56,9 +56,8 @@ async def health_check():
     return {
         "status": "ok",
         "service": "voice-alert-server",
-        "ntfy_topic": clean_env("NTFY_TOPIC"),
+        "telegram_configured": bool(clean_env("TELEGRAM_BOT_TOKEN") and clean_env("TELEGRAM_CHAT_ID")),
         "public_url": clean_env("PUBLIC_SERVER_URL"),
-        "has_ntfy_token": bool(clean_env("NTFY_TOKEN")),
     }
 
 
@@ -79,11 +78,15 @@ async def handle_email_alert(
     livekit_url = clean_env("LIVEKIT_URL")
     api_key = clean_env("LIVEKIT_API_KEY")
     api_secret = clean_env("LIVEKIT_API_SECRET")
-    ntfy_topic = clean_env("NTFY_TOPIC")
     public_url = clean_env("PUBLIC_SERVER_URL").rstrip("/")
+    tg_token = clean_env("TELEGRAM_BOT_TOKEN")
+    tg_chat_id = clean_env("TELEGRAM_CHAT_ID")
 
-    if not ntfy_topic:
-        raise HTTPException(status_code=500, detail="NTFY_TOPIC is missing in Render Environment")
+    if not tg_token or not tg_chat_id:
+        raise HTTPException(
+            status_code=500,
+            detail="TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing in Render Environment",
+        )
     if not public_url.startswith(("http://", "https://")):
         raise HTTPException(
             status_code=500,
@@ -124,37 +127,24 @@ async def handle_email_alert(
 
     call_link = f"{public_url}/call?ws={quote(livekit_url, safe='')}&token={quote(token, safe='')}&task={quote(email.subject[:40], safe='')}"
 
-    ntfy_headers = {}
-    ntfy_token = clean_env("NTFY_TOKEN")
-    if ntfy_token:
-        ntfy_headers["Authorization"] = f"Bearer {ntfy_token}"
-
-    ntfy_res = requests.post(
-        "https://ntfy.sh",
-        headers=ntfy_headers,
+    tg_res = requests.post(
+        f"https://api.telegram.org/bot{tg_token}/sendMessage",
         json={
-            "topic": ntfy_topic,
-            "title": f"ALERT: {email.subject[:60]}",
-            "message": cleaned_body[:180] or email.subject,
-            "priority": 5,
-            "tags": ["rotating_light", "telephone_receiver"],
-            "click": call_link,
-            "actions": [
-                {
-                    "action": "view",
-                    "label": "Answer Call",
-                    "url": call_link,
-                    "clear": True,
-                }
-            ],
+            "chat_id": tg_chat_id,
+            "text": f"🚨 ALERT: {email.subject}\n\n{cleaned_body[:300] or email.subject}",
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "📞 Answer Call", "url": call_link}]
+                ]
+            },
         },
         timeout=10,
     )
 
-    if not ntfy_res.ok:
+    if not tg_res.ok:
         raise HTTPException(
             status_code=502,
-            detail=f"ntfy.sh rejected notification ({ntfy_res.status_code}): {ntfy_res.text}",
+            detail=f"Telegram rejected alert ({tg_res.status_code}): {tg_res.text}",
         )
 
     LAST_ALERT_SENT[alert_key] = now
@@ -162,8 +152,7 @@ async def handle_email_alert(
     return {
         "status": "ringing",
         "room": room_name,
-        "topic": ntfy_topic,
-        "ntfy_status": ntfy_res.status_code,
+        "telegram_status": tg_res.status_code,
     }
 
 
