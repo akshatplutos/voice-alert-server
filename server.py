@@ -58,6 +58,7 @@ async def health_check():
         "service": "voice-alert-server",
         "ntfy_topic": clean_env("NTFY_TOPIC"),
         "public_url": clean_env("PUBLIC_SERVER_URL"),
+        "has_ntfy_token": bool(clean_env("NTFY_TOKEN")),
     }
 
 
@@ -123,8 +124,14 @@ async def handle_email_alert(
 
     call_link = f"{public_url}/call?ws={quote(livekit_url, safe='')}&token={quote(token, safe='')}&task={quote(email.subject[:40], safe='')}"
 
+    ntfy_headers = {}
+    ntfy_token = clean_env("NTFY_TOKEN")
+    if ntfy_token:
+        ntfy_headers["Authorization"] = f"Bearer {ntfy_token}"
+
     ntfy_res = requests.post(
         "https://ntfy.sh",
+        headers=ntfy_headers,
         json={
             "topic": ntfy_topic,
             "title": f"ALERT: {email.subject[:60]}",
