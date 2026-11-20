@@ -4,7 +4,7 @@ import os
 import re
 import time
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 import requests
 from dotenv import load_dotenv
@@ -57,6 +57,7 @@ async def health_check():
         "status": "ok",
         "service": "voice-alert-server",
         "telegram_configured": bool(clean_env("TELEGRAM_BOT_TOKEN") and clean_env("TELEGRAM_CHAT_ID")),
+        "callmebot_configured": bool(clean_env("CALLMEBOT_USER")),
         "public_url": clean_env("PUBLIC_SERVER_URL"),
     }
 
@@ -81,6 +82,7 @@ async def handle_email_alert(
     public_url = clean_env("PUBLIC_SERVER_URL").rstrip("/")
     tg_token = clean_env("TELEGRAM_BOT_TOKEN")
     tg_chat_id = clean_env("TELEGRAM_CHAT_ID")
+    callmebot_user = clean_env("CALLMEBOT_USER")
 
     if not tg_token or not tg_chat_id:
         raise HTTPException(
@@ -127,6 +129,23 @@ async def handle_email_alert(
 
     call_link = f"{public_url}/call?ws={quote(livekit_url, safe='')}&token={quote(token, safe='')}&task={quote(email.subject[:40], safe='')}"
 
+    # 1. Trigger a real incoming Telegram voice call with TTS readout
+    call_status = "skipped_no_callmebot_user"
+    if callmebot_user:
+        spoken_alert = f"Urgent C S C Alert. {email.subject[:180]}"
+        cmb_url = (
+            "http://api.callmebot.com/start.php"
+            f"?user={quote(callmebot_user, safe='@+')}"
+            f"&text={quote_plus(spoken_alert)}"
+            "&lang=en-US-Standard-B&rpt=2&cc=no"
+        )
+        try:
+            cmb_res = requests.get(cmb_url, timeout=15)
+            call_status = f"http_{cmb_res.status_code}"
+        except Exception as exc:
+            call_status = f"error_{type(exc).__name__}"
+
+    # 2. Send Telegram Bot message with interactive Answer Call button
     tg_res = requests.post(
         f"https://api.telegram.org/bot{tg_token}/sendMessage",
         json={
@@ -152,6 +171,7 @@ async def handle_email_alert(
     return {
         "status": "ringing",
         "room": room_name,
+        "voice_call_status": call_status,
         "telegram_status": tg_res.status_code,
     }
 
