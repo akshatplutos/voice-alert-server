@@ -32,8 +32,13 @@ class AgentActionRequest(BaseModel):
     service_name: str
 
 
+def clean_env(name: str, default: str = "") -> str:
+    val = os.environ.get(name, default)
+    return val.strip().strip('"').strip("'")
+
+
 def verify_secret(provided_secret: str | None):
-    expected = os.environ.get("WEBHOOK_SECRET")
+    expected = clean_env("WEBHOOK_SECRET")
     if expected and provided_secret != expected:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
@@ -48,7 +53,12 @@ def clean_email_text(raw_text: str) -> str:
 @app.get("/")
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "voice-alert-server"}
+    return {
+        "status": "ok",
+        "service": "voice-alert-server",
+        "ntfy_topic": clean_env("NTFY_TOPIC"),
+        "public_url": clean_env("PUBLIC_SERVER_URL"),
+    }
 
 
 @app.post("/webhook/email-alert")
@@ -63,15 +73,21 @@ async def handle_email_alert(
     if now - LAST_ALERT_SENT.get(alert_key, 0) < COOLDOWN_SECONDS:
         return {"status": "suppressed_cooldown", "subject": alert_key}
 
-    LAST_ALERT_SENT[alert_key] = now
-
     cleaned_body = clean_email_text(email.body)
     room_name = f"email-alert-{uuid.uuid4().hex[:8]}"
-    livekit_url = os.environ["LIVEKIT_URL"]
-    api_key = os.environ["LIVEKIT_API_KEY"]
-    api_secret = os.environ["LIVEKIT_API_SECRET"]
-    ntfy_topic = os.environ["NTFY_TOPIC"]
-    public_url = os.environ["PUBLIC_SERVER_URL"].rstrip("/")
+    livekit_url = clean_env("LIVEKIT_URL")
+    api_key = clean_env("LIVEKIT_API_KEY")
+    api_secret = clean_env("LIVEKIT_API_SECRET")
+    ntfy_topic = clean_env("NTFY_TOPIC")
+    public_url = clean_env("PUBLIC_SERVER_URL").rstrip("/")
+
+    if not ntfy_topic:
+        raise HTTPException(status_code=500, detail="NTFY_TOPIC is missing in Render Environment")
+    if not public_url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid PUBLIC_SERVER_URL in Render Environment: {public_url!r}",
+        )
 
     context_payload = {
         "task_name": email.subject,
@@ -105,9 +121,9 @@ async def handle_email_alert(
         .to_jwt()
     )
 
-    call_link = f"{public_url}/call?ws={quote(livekit_url)}&token={quote(token)}&task={quote(email.subject[:40])}"
+    call_link = f"{public_url}/call?ws={quote(livekit_url, safe='')}&token={quote(token, safe='')}&task={quote(email.subject[:40], safe='')}"
 
-    requests.post(
+    ntfy_res = requests.post(
         "https://ntfy.sh",
         json={
             "topic": ntfy_topic,
@@ -128,7 +144,20 @@ async def handle_email_alert(
         timeout=10,
     )
 
-    return {"status": "ringing", "room": room_name}
+    if not ntfy_res.ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"ntfy.sh rejected notification ({ntfy_res.status_code}): {ntfy_res.text}",
+        )
+
+    LAST_ALERT_SENT[alert_key] = now
+
+    return {
+        "status": "ringing",
+        "room": room_name,
+        "topic": ntfy_topic,
+        "ntfy_status": ntfy_res.status_code,
+    }
 
 
 @app.post("/webhook/resend-inbound")
@@ -148,7 +177,7 @@ async def handle_resend_inbound(
     subject = data.get("subject", "Service Alert")
 
     body_text = subject
-    resend_key = os.environ.get("RESEND_API_KEY")
+    resend_key = clean_env("RESEND_API_KEY")
     if resend_key and email_id:
         res = requests.get(
             f"https://api.resend.com/emails/receiving/{email_id}",
@@ -175,7 +204,7 @@ async def execute_action(
     verify_secret(x_webhook_secret)
 
     if req.action == "recheck":
-        url = os.environ.get("TARGET_HEALTH_URL")
+        url = clean_env("TARGET_HEALTH_URL")
         if not url:
             return {"result": "No target health URL is configured."}
         try:
@@ -185,7 +214,7 @@ async def execute_action(
             return {"result": f"Service is still unreachable: {type(exc).__name__}."}
 
     if req.action == "restart":
-        hook = os.environ.get("RESTART_WEBHOOK_URL")
+        hook = clean_env("RESTART_WEBHOOK_URL")
         if not hook:
             return {"result": "No restart webhook URL is configured yet."}
         r = requests.post(hook, timeout=10)
