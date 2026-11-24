@@ -57,6 +57,7 @@ async def health_check():
         "status": "ok",
         "service": "voice-alert-server",
         "telegram_configured": bool(clean_env("TELEGRAM_BOT_TOKEN") and clean_env("TELEGRAM_CHAT_ID")),
+        "discord_configured": bool(clean_env("DISCORD_WEBHOOK_URL")),
         "callmebot_configured": bool(clean_env("CALLMEBOT_USER")),
         "public_url": clean_env("PUBLIC_SERVER_URL"),
     }
@@ -82,6 +83,7 @@ async def handle_email_alert(
     public_url = clean_env("PUBLIC_SERVER_URL").rstrip("/")
     tg_token = clean_env("TELEGRAM_BOT_TOKEN")
     tg_chat_id = clean_env("TELEGRAM_CHAT_ID")
+    discord_url = clean_env("DISCORD_WEBHOOK_URL")
     callmebot_user = clean_env("CALLMEBOT_USER")
 
     if not tg_token or not tg_chat_id:
@@ -166,6 +168,26 @@ async def handle_email_alert(
             detail=f"Telegram rejected alert ({tg_res.status_code}): {tg_res.text}",
         )
 
+    # 3. Send Discord Webhook alert with clickable Answer Call link
+    discord_status = "skipped_no_discord_url"
+    if discord_url:
+        discord_payload = {
+            "username": "CSC & Payment Alert Bot",
+            "embeds": [
+                {
+                    "title": f"🚨 {email.subject[:250]}",
+                    "description": f"{cleaned_body[:1500] or email.subject}\n\n📞 **[Answer Live Voice Call]({call_link})**",
+                    "color": 15548997,
+                    "footer": {"text": f"Source: {email.sender}"},
+                }
+            ],
+        }
+        try:
+            dc_res = requests.post(discord_url, json=discord_payload, timeout=10)
+            discord_status = f"http_{dc_res.status_code}"
+        except Exception as exc:
+            discord_status = f"error_{type(exc).__name__}"
+
     LAST_ALERT_SENT[alert_key] = now
 
     return {
@@ -173,6 +195,7 @@ async def handle_email_alert(
         "room": room_name,
         "voice_call_status": call_status,
         "telegram_status": tg_res.status_code,
+        "discord_status": discord_status,
     }
 
 
