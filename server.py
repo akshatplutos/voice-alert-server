@@ -241,6 +241,24 @@ def build_discord_alert(
 # BUILD COMPACT BANK PAYMENT LOGS DISCORD ALERT
 # ==========================================================
 
+def normalize_bank_username(raw_text: str) -> str:
+    text = raw_text.strip()
+
+    if re.search(r"\b(boi|bank of india)\b", text, re.IGNORECASE):
+        return "Bank of India"
+    if re.search(r"\b(pnb|punjab national bank)\b", text, re.IGNORECASE):
+        return "Punjab National Bank"
+    if re.search(r"\b(idfc|idfc first bank)\b", text, re.IGNORECASE):
+        return "IDFC FIRST Bank"
+
+    # Strip trailing OU codes like "(BO51)" or "(IF51)" for any other bank
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+    if not cleaned or cleaned.lower() == "unknown bank":
+        return "Bank Alert"
+
+    return cleaned[:80]
+
+
 def build_payment_logs_alert(
     subject: str,
     body: str,
@@ -249,7 +267,7 @@ def build_payment_logs_alert(
 
     clean_body = clean_email_text(body)
 
-    # 1. Extract Bank / OU name (e.g., "IDFC FIRST Bank (IF51)")
+    # 1. Extract Bank / OU name (e.g., "IDFC FIRST Bank (IF51)" or "Bank of India (BO51)")
     bank_match = re.search(
         r"Payment Logs Alert\s*\[([^\]]+)\]",
         subject,
@@ -259,7 +277,19 @@ def build_payment_logs_alert(
         clean_body,
         re.IGNORECASE
     )
-    bank_name = bank_match.group(1).strip() if bank_match else "Unknown Bank"
+    extracted_bank = bank_match.group(1).strip() if bank_match else ""
+
+    # Normalize the Discord sender username using both extracted label and subject/body
+    clean_bank_username = normalize_bank_username(
+        extracted_bank or f"{subject} {clean_body[:200]}"
+    )
+
+    # Use full extracted label (with OU code) in the card, or clean bank name if missing
+    bank_display = (
+        extracted_bank
+        if extracted_bank and extracted_bank.lower() != "unknown bank"
+        else clean_bank_username
+    )
 
     # 2. Detect Acknowledgement Failure vs. Posting Failure
     is_ack_failure = bool(
@@ -267,7 +297,7 @@ def build_payment_logs_alert(
     )
 
     if is_ack_failure:
-        title = f"🚨 {bank_name} | ACK FAILURE"
+        title = f"🚨 {bank_display} | ACK FAILURE"
         color = 0xED4245  # Red
         condition_text = "`isAcknowledged = false` (excl. `:59`)"
         action_note = (
@@ -275,7 +305,7 @@ def build_payment_logs_alert(
             "Please check immediately."
         )
     else:
-        title = f"⚠️ {bank_name} | POSTING FAILURE"
+        title = f"⚠️ {bank_display} | POSTING FAILURE"
         color = 0xF0B232  # Amber/Orange
         condition_text = "`isPosted = false` & `isAcknowledged = true`"
         action_note = (
@@ -308,7 +338,7 @@ def build_payment_logs_alert(
         biller_lines = f"• {clean_body[:300]}"
 
     description = (
-        f"🏦 **Bank / OU:** {bank_name}\n"
+        f"🏦 **Bank / OU:** {bank_display}\n"
         f"🔍 **Condition:** {condition_text}\n\n"
         f"**Affected Billers:**\n"
         f"{biller_lines}\n\n"
@@ -323,7 +353,7 @@ def build_payment_logs_alert(
         "description": description,
         "color": color,
         "footer": {
-            "text": f"Bank Payment Monitoring • {bank_name}"
+            "text": f"Bank Payment Monitoring • {bank_display}"
         },
         "timestamp": time.strftime(
             "%Y-%m-%dT%H:%M:%SZ",
@@ -331,7 +361,7 @@ def build_payment_logs_alert(
         )
     }
 
-    return embed, True
+    return embed, True, clean_bank_username
 
 
 # ==========================================================
@@ -370,12 +400,16 @@ def send_discord_alert(
             body,
             call_link=call_link
         )
+        bot_username = "CSC Alert"
+
     elif is_payment_alert:
-        embed, is_critical = build_payment_logs_alert(
+        embed, is_critical, bank_username = build_payment_logs_alert(
             subject,
             body,
             call_link=call_link
         )
+        bot_username = bank_username[:80]
+
     else:
         cleaned_body = clean_email_text(body)
         desc = cleaned_body[:1500] or subject[:1500]
@@ -395,6 +429,7 @@ def send_discord_alert(
             )
         }
         is_critical = False
+        bot_username = "Service Alert"
 
     target_discord_url = (
         discord_critical_url
@@ -406,7 +441,7 @@ def send_discord_alert(
         return "skipped_no_discord_url"
 
     discord_payload = {
-        "username": "CSC & Payment Alert Bot",
+        "username": bot_username,
         "embeds": [embed],
         "allowed_mentions": {
             "parse": []
@@ -421,7 +456,7 @@ def send_discord_alert(
         )
 
         if dc_res.ok:
-            print(f"Discord alert sent: {embed['title']}")
+            print(f"Discord alert sent [{bot_username}]: {embed['title']}")
         else:
             print(f"Discord alert failed: HTTP {dc_res.status_code}")
 
